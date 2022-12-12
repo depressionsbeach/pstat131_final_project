@@ -1,0 +1,845 @@
+---
+title: "PSTAT 131 Final Project"
+author: "Baiming Wang"
+date: "11-12-2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+### Not Short and Not funny Forewords (or, I can't believe I am trying to explain football for a college project)
+
+Football, or as some wrongly call it, soccer, is a thing. In short, it is a sports game played between two teams of eleven each, during which the team that I support never wins. It is a game enjoyed by billions of fans worldwide, especially as of this writing, when the FIFA World Cup is taking place. 
+
+Teams gains points ("goals") by putting the ball into the opponents' goal without using hands or arms, and the team with the higher score wins the match. An assist is the immediately preceding pass to the player that scores. 
+
+Goals, being the most important element in football, have attracted the most attention in terms of sports analytics. Assists, being arguably the second most important element, is not getting investigated as much as I think it should. 
+
+**The goal of this project is to (unsuccessfully) establish a model that predicts a football player's assists per game based on other football-related data about the player.** In doing so, I hope to create a metric for players' creativity that specifically represent the number of assist a player *should* have made based on his or her overall performance.
+  
+### The Section Where I Embed Some Video As A Distraction
+
+Due to the importance of goals in football, spectacular goals have received the most applause, acclaims, and awards. They, however, do not overshadow the equally spectacular assists, many of which wildly imaginative. Here is a clip of some of the best assists during the 2021/2022 Bundesliga season. This video is absolutely unnecessary for the project, but it is a must-watch for your own enjoyment.  
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#install.packages('vembedr')
+library(vembedr)
+embed_youtube("lz92XPlMV6E")
+#I embedded a video here for no reason other than people should see these absolutely beautiful plays :) and if they don't look at the source code they don't see this message.
+#Who the fuck hasn't ever ignored "warnings" lollllll
+```
+### Motivations
+
+In the last decade, the popularity of football analytics exploded over the Internet. Many new metrics have been created, the most famous of which is *xG*, or Expected Goals, an estimation of the number of goals that a player *should have scored* in a given time frame. The idea is that, since goals are scored quite infrequently, it has a large variance and is therefore inadequate to measure players' performances. By building a model based on more common actions (such as passes, shots, etc.), we can calculated, with a smaller variance, the number of goals a player deserves to score. I wish to mirror this idea for assists.
+
+One of the driving motivations for me is the recent woes of Atalanta, a club that I support. They've been suffering from a lack of creativity. By building this model, I could find players who are expected to make many assists (i.e. highly creative) that can solve Atalanta's problems. 
+
+### Loading Packages 
+
+```{r, warning=FALSE, message=FALSE}
+source('rscripts/packages.r')
+```
+
+## Data Extraction
+
+All of the data is extracted from fbref.com using a scraper tool developed by Rafał Stępień. All the credit for data scraping goes to him (see more at readme.txt). Fbref.com is a very reputable football data website among football data wonks. They offer, arguably, the most comprehensive football data Out of all free-to-use football data sites. The data I collected is from the last completed season (2021/22 season) across the big five European leagues (the English Premier League, the German Bundesliga, the Italian Serie A, the Spanish La Liga, and the French Ligue 1). 
+
+The webscraping tool can be found at '/scraper/FBRef Scrap Modified.ipynb'. 
+```{r, class.source = 'fold-show'}
+original_stats <- read.csv(sep = ';',file = 'data/unprocessed/fbrefdata2022.csv') 
+head(original_stats)
+```
+```{r, class.source = 'fold-show'}
+nrow(original_stats)
+ncol(original_stats)
+```
+<br />
+We have 2921 observations and 119 variables. These should be more than enough for this project. While I cannot possibly write all of the descriptions here (please refer to 'data/unprocessed/codebook.pdf' and 'data/unprocessed/codebookbook.txt'), I will provide some for the variables mentioned in this write-up. 
+
+ - `assists_per90` : Our outcome variable. It represents the number of assists one player makes every 90 minutes, which is the length of a football match.
+
+### Data Cleaning
+
+Let's filter out players who played for fewer than 900 minutes (10 full matches). Since our outcome variable is `assists_per90`, we must exclude those who have not played enough, as these data points heavily skews the data set. (For example, if one player gets substituted on for 10 minutes and makes an assist, his `assists_per90` would be 9, which is an outlier).
+
+- `minutes` : The total number of minutes of when a player is on the pitch in the 2021/22 season. 
+
+```{r}
+original_stats <- original_stats %>%
+  #filter out players who have not played enough
+  filter(minutes >= 900) %>%
+  #filter out the X variable, whihc is nothing more than an index
+  select(-X)
+```
+<br />
+
+- `position`: The position of a player on the pitch. The four values, ordered by proximity to the opponents' goal, are **FW**, **MF**, **DF**, and **GK**, which respectively stands for **forward**, **midfielder**,  **"defender"**, and **goalkeeper**. 
+
+<br />
+Notice the values of `position` includes outfield (a.k.a. not goalkeeper) players who play multiple positions, as well as goalkeepers. 
+
+```{r, class.source = 'fold-show'}
+original_stats$position %>% unique()
+```
+<br />
+First, we select the first two characters for every player's `position`, so that only their primary position is considered. Next, we factorize `position` (which necessitates the previous step). Finally, we exclude all goalkeepers from consideration. This is necessary because goalkeepers have a fundamentally different role than outfield players and outfield players' stats generally don't apply to goalkeepers. 
+
+```{r}
+original_stats$position <- 
+  #Only consider the primary position
+  substr(original_stats$position,start = 1, stop = 2)
+
+  #Factorize position
+original_stats$position <- factor(original_stats$position)
+  
+  #Exclude all goalies
+original_stats <- original_stats %>%
+  filter(position != "GK") 
+
+head(original_stats)
+```
+
+### First Attempt at Dimension Reduction
+<br />
+Since we have 119 variables, we must reduce the dimensions. The first step that I took is to use my existing knowledge about football to eliminate more than half of the variables. The description of all variables can be found in the codebook (authored by Rafał Stępień), and I think many choices I made here are quite reasonable. While this might not be the most rigorous way of conducting data analysis, it certainly helps with reducing computational workload. 
+
+```{r}
+#List of variables that's kept after the empirical filter; as well as "player", which acts like an identifier
+
+no_redundancy <- c("player", "aerials_won", "aerials_won_pct", "age", "ball_recoveries", "blocks", "clearances", "crosses", "crosses_into_penalty_area", "dispossessed", "dribbles", "dribbles_completed_pct", "fouled", "fouls", "games", "games_starts", "interceptions", "minutes_90s", "miscontrols", "offsides", "passes","passes_pct", "passes_long", "passes_medium", "passes_short", "passes_pct_long", "passes_pct_medium", "passes_pct_short", "progressive_passes", "passes_progressive_distance", "passes_received", "passes_total_distance", "sca_per90", "shots_on_target_pct","tackles", "tackles_att_3rd",  "tackles_mid_3rd", "through_balls", "touches","touches_att_3rd","touches_mid_3rd","passes_into_final_third", "passes_into_penalty_area", "xg_per90", "position", "assists_per90")
+```
+
+```{r, class.source = 'fold-show'}
+#Select the specific columns from the data
+stats <- original_stats %>% select(all_of(no_redundancy))
+ncol(stats)
+```
+<br />
+Next, we convert statistics collected per season into per game by dividing those statistics with `minutes` and multiply them by 90 (since, obviously, a game is 90 minutes). The following algorithm converts both the data and the column headers. The use of the grepl() is inspired by  https://rdrr.io/cran/stringx/man/grepl.html
+
+
+```{r, class.source = 'fold-show'}
+for(i in 2:(ncol(stats)-2)){
+    #Filter out the variables that don't need conversion
+    if(!grepl(pattern = "90", x = colnames(stats)[i], fixed=TRUE) &
+       !grepl(pattern = "pct", x = colnames(stats)[i], fixed=TRUE) &
+       !grepl(pattern = "age", x = colnames(stats)[i], fixed=TRUE) & 
+       !grepl(pattern = "games", x = colnames(stats)[i], fixed=TRUE)){
+         #Convert the value of the variable
+         stats[,i] = stats[,i]*90/original_stats$minutes
+         
+         #Convert the column header
+         colnames(stats)[i] = paste(colnames(stats)[i], "per90", sep="_")
+       }
+}
+head(stats)
+```
+
+## Exploratory Data Analysis
+
+### Missing Values (Or, the Lack Thereof)
+<br />
+One great thing about this data set is that it has no missing values. Of course, this is due to being scraped directly from a well-maintained onlne database.
+
+```{r, class.source = 'fold-show'}
+sum(is.na(stats))
+```
+<br />
+
+### The Outcome Variable
+
+Let's examine the outcome variable `assists_per90` itself.
+```{r, class.source = 'fold-show'}
+summary(stats$assists_per90)
+```
+<br />
+Let's do the obvious by drawing a histogram of the response variable.
+
+```{r, message=FALSE}
+stats %>% ggplot(aes(x= assists_per90)) + geom_histogram() + labs(title="Histogram of the Response Variable")
+```
+<br />
+Here we can see one of the biggest challenges of this data set: there are so many zeroes. However, there are also many not-zeroes, so I felt more confident . <br />
+On a side note, one thing I contemplated doing was to exclude all the zeros and take a square root of `assist_per90`. This transformation would have made the data more symmetrical. I decided against it because it would throwy away quite many observations.  <br />
+
+### Outcome-Predictor Correlations
+
+In the third part of the EDA, we examine the relationship between the outcome variable and the (potential) predictors.
+
+<br />
+In the following bar chart and box plot, we can see that the likelihoods of players from each `position` making assists, in descending order, is forwards, midfielders, and defenders. This is consistent with our intuition, as they are the posited closest to farthest from the opponents' goal.  
+
+```{r}
+stats %>%
+  ggplot(aes(x=position)) +
+  geom_bar(aes(fill = (assists_per90 > 0))) +
+  labs(title = "Bar Chart of Position")
+```
+<br />
+Notice that the 25th quantile of **DF** is still 0. The outlier observations is consistent with the fact that `assists_per90` skews heavily to the right. 
+
+```{r}
+stats %>%
+  ggplot(aes(x=assists_per90, y = position)) + geom_boxplot() +
+  labs(title = "Box plot of Position by Assists Per 90 Minutes")
+```
+
+<br />
+Despite their differences in assisting frequencies, the distribution of `assists_per90` across different `positions` is surprisingly similars, with coinciding peaks and dips. 
+
+```{r,message=FALSE}
+stats %>%
+  ggplot(aes(x=assists_per90)) +
+  geom_histogram(aes(color = position, fill=position), alpha = 0.2) + 
+  labs(title = "Histogram of Assists Per 90 Minutes Stratified By Position")
+```
+<br />
+Since position is the only categorical variable in this data set, we've had quite a bit fun with it. Now let's look at some of the numeric variables. As there are so many of them, I will mostly gloss over it and briefly mention things I found interesting. 
+
+<br />
+Some of the correlation between a predictor and the response is nothing but expected. For instance, this is a scatter plot between `sca_per90` and `assists_per90`. It is quite intuitive that the more shot-creating actions a player generates, the more likely he or she will make an assist. 
+  
+```{r, message=FALSE}
+stats %>% ggplot(aes(x = sca_per90, y = assists_per90,  color = position)) + geom_point() + geom_smooth() + labs(title = "Assists by Shot-Creating Actions (per 90 minutes)")
+```
+<br />
+Some of the correlations are a bit more unexpected though. For instance, I did not expect a positive correlation between *miscontrols* and *assists*. Since *miscontrols* leads to the loss of ball possession, I had initially thought that the correlation is negative. 
+
+- `Miscontrols` : Poor touches of the ball that lead to dispossession. 
+
+```{r, message=FALSE}
+stats %>% ggplot(aes(x = miscontrols_per90, y = assists_per90)) + geom_point() + geom_smooth(method = 'lm') + labs(title = "Assists by Ball Miscontrols (per 90 minutes)")
+```
+<br />
+What is more interesting, if you group the data by `position`, you will see two positive and one negative correlation!
+
+```{r, message=FALSE}
+stats %>% ggplot(aes(x = miscontrols_per90, y = assists_per90, color = position)) + geom_point() + geom_smooth(method = 'lm') + labs(title = "Assists by Ball Miscontrols (per 90 minutes)")
+```
+
+<br />
+One stat that I was, like many other football stats wonks, obsessed about, is *progressive passes*. If you head out to Twitter and chime in a discussion, you'll hear players being celebrated of good progressive passes numbers instead of goals. It has become a "gold standard" to examine if a player creates chances for a team. However, as the scatter plot below shows, the correlation between *progressive passes* and *assists* is relatively weak. 
+
+- `progressive_passes_per90` : number of progressive passes made by a player every 90 minutes. A progressive pass is a pass that brings a ball at least 10 yards (30 feet, 9.144 metres) closer to the goal line of the opponent's half. 
+
+```{r, message=FALSE}
+stats %>% ggplot(aes(x = progressive_passes_per90, y = assists_per90)) + geom_point() + geom_smooth(method = 'lm') + labs(title = "Assists by Progressive Passes (per 90 minutes)")
+```
+
+### A More In-Depth Look
+<br />
+The following algorithm calculates the correlations between all numeric predictors and `assists_per90`, and sort them from the strongest to the weakest. This algorithm is inspired by  https://statisticsglobe.com/correlation-one-variable-all-others-r
+
+```{r, class.source = 'fold-show'}
+#Calculate the correlation between each numeric predictor and the response
+data_cor <- cor(x = stats
+                %>%select(where(is.numeric))
+                %>%select(-c(assists_per90)),
+                y = stats$assists_per90)
+data_cor <- data_cor%>%data.frame()
+
+#Take absolute values to estimate the "strength" of correlation
+data_cor$abs <- abs(data_cor$.)
+
+#Sort variable correlations from the strongest to the weakest
+data_cor <- data_cor[order(data_cor$abs,decreasing = TRUE),]
+data_cor
+```
+<br />
+As we glance through `data_cor`, we can still see lots of variables that correlates significantly with `assists_per90`, which suggests strong multicollinearity between the predictors. For now, let's filter out variables that do correlate weakly with `assists_per90`, and write `player`, `position`, and `assists_per90` to a new data set called `fb`. 
+
+- `player` : The name of the player. 
+
+```{r, class.source = 'fold-show'}
+new_df<-data_cor %>% filter(abs >= 0.05) %>%
+  rownames_to_column()
+new_vec <- c("player", new_df[,1], "position","assists_per90")
+
+fb <- stats %>% select(all_of(new_vec))
+head(fb)
+```
+
+### Predictor-Predictor Correlations
+<br />
+
+While we have calculated the correlations between each predictor and the response, we now need to assess the correlations between the predictors. As the previous step suggests, there is strong multicollinearity in the data set. To make simpler visualisation, copy `fb` into a temporary data set `tmp` with shorter column names (the column names of `fb` are quite long). 
+
+```{r}
+tmp <- fb
+dict <- colnames(tmp)
+for(i in 2:ncol(tmp)-2){
+  colnames(tmp)[i] <- paste("nv", i-1, sep='')
+}
+colnames(tmp)[1] <- "player"
+colnames(tmp)[ncol(tmp)-1] <- "position"
+colnames(tmp)[ncol(tmp)] <- "outcome"
+```
+<br />
+Create a correlation plot of tmp. "nv" stands for "numeric variable." We'll not investigate each of the correlations since there are too many. This *corrplot* simply gives a high-level idea about how strong the multicollinearity is. 
+```{r}
+tmp %>%
+  select(-c(player, position)) %>%
+  na.omit() %>%
+  cor() %>%
+  corrplot(method = "color",type="lower", tl.cex = 0.6)
+
+```
+<br />
+The presence of multicollineraity prompts me to conduct a PCA. While 35 variables is not too many for devices more powerful than mine, and certain regression model (such as LASSO) can deal with multicollineraity, I reckon that the simplification PCA brings justify the tiny amount of variance loss.
+
+```{r, class.source = 'fold-show'}
+
+#Deselect non-numeric variables and the responce variable 
+fb_filtered <- fb %>%
+  select(-c(player, assists_per90, position))
+
+#Create a PCA transformation formula
+pca_trans <-  fb_filtered %>%
+  recipe() %>%
+  step_normalize(all_numeric()) %>%
+  step_zv() %>% 
+  #10 principle components account for more than 99.9% of the variance
+  step_pca(all_numeric(), num_comp = 10) 
+
+#Transform the fb data set
+fb_pca<- pca_trans %>%
+  prep(training = fb_filtered) %>%
+  bake(fb_filtered)
+
+#Add back the variables
+fb_pca$player <- fb$player
+fb_pca$position <- fb$position
+fb_pca$assists_per90 <- fb$assists_per90
+head(fb_pca)
+```
+<br />
+The first principle component seems to account for the proximity of a player to the opponent's goal. 
+```{r, message=FALSE}
+fb_pca %>%
+  ggplot(aes(x = PC01, y = assists_per90)) +
+  geom_point(aes(color = position)) + geom_smooth(method = 'lm', color = "gold") + labs(title = 'Scatter Plot of Responce by the First Princepal Component')
+```
+<br />
+The second principle component? Not so much. 
+```{r, message=FALSE}
+fb_pca %>%
+  ggplot(aes(x = PC02, y = assists_per90)) +
+  geom_point(aes(color = position)) + geom_smooth(method = 'lm', color = "gold") + labs(title = 'Scatter Plot of Responce by the Second Princepal Component')
+```
+
+## Preparations for Bulding Models
+
+### Splitting Data
+<br />
+We set a seed so that we will always see the same results. 1729 is the famous taxicab number. 
+```{r, class.source = 'fold-show'}
+set.seed(1729)
+```
+<br />
+Split the data stratified on `position`, so that each position(**FW**, **MF**, and **DF**) are proportionally represented in training and testing. I settled on a proportion of 0.8 per the 80/20 rule. Lastly, deselect `player` from the training set as it is not a predictor. 
+
+```{r, eval=FALSE, class.source = 'fold-show'}
+fb_split <- initial_split(data = fb_pca, prop = 0.8, strata = position)
+fb_train <- training(fb_split)
+fb_test <- testing(fb_split)
+fb_train <- fb_train %>% select(-player)
+```
+
+```{r,echo=FALSE}
+#write.csv(fb_train, file = 'data/processed/fb_train.csv')
+#write.csv(fb_test, file = 'data/processed/fb_test.csv')
+fb_train <- read.csv('data/processed/fb_train.csv')
+fb_test <- read.csv('data/processed/fb_test.csv')
+```
+
+```{r, class.source = 'fold-show'}
+#If split correctly, this value should be close to 4
+nrow(fb_train)/nrow(fb_test)
+```
+<br /> It indeed is close.
+<br />
+<br /> Split the training set into five folds and three repeats. Again, stratify the data on `position`. *I would have set a larger number for folds and repeats if not for the fact that this combination is already making the random forest run for hours.*
+
+```{r, class.source = 'fold-show'}
+fb_folds <- fb_train %>%
+  vfold_cv(v = 5, strata = position, repeats = 3)
+```
+
+### Build A Recipe
+
+We build a recipe by correlating the `assists_per90` with all other variables of `fb_train` (which are the ten principal components and `position`). Add a dummy step for `position`. Since we have already done the PCA, we no longer need to normalize or add an interaction step. 
+```{r, class.source = 'fold-show'}
+fb_recipe <- fb_train %>%
+  recipe(assists_per90 ~ .) %>%
+  step_dummy(position)
+```
+
+## Building and Fitting Models 
+<br />
+The key performance metric of these models is RMSE because the goal of the project is more about making accurate predictions of the outcome variable instead of statistical inference.  
+
+### Linear Regression
+<br />
+The first model is the classic linear regression model. 
+```{r, warning=FALSE, message=FALSE}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+lm_wf <- workflow() %>%
+  add_model(lm_model) %>%
+  add_recipe(fb_recipe)
+lm_fit_resamples <- fit_resamples(lm_wf, fb_folds)
+```
+<br />
+The summary RMSE across the folds
+```{r}
+collect_metrics(lm_fit_resamples)[1,c(1,3,5)]
+```
+
+### K-Nearest Neighbours
+<br />
+The second model is K-Nearest Neighbours. Establish a workflow and tune the parameter `neighbours` by 2 to 102 in 21 levels.  
+```{r}
+knn_spec <- 
+  nearest_neighbor(neighbors = tune()) %>%
+  set_mode("regression") %>% 
+  set_engine("kknn")
+
+knn_wf <- workflow() %>% 
+  add_model(knn_spec) %>% 
+  add_recipe(fb_recipe)
+
+knn_grid <- grid_regular(neighbors(range= c(2, 102)), levels = 21)
+```
+<br />
+Tuning the KNN model. 
+```{r, warning=FALSE, eval=FALSE}
+knn_res <- tune_grid(
+  knn_wf,
+  resamples = fb_folds, 
+  grid = knn_grid
+)
+```
+
+```{r, echo=FALSE}
+#save(knn_res, file = 'tuned/knn_res.rda')
+load(file = 'tuned/knn_res.rda')
+```
+<br />
+Plot the performance of the model against the tuning parameter. We can see the performance of the model improves initially, flattens out at around k=25, and eventually worsens.
+```{r}
+autoplot(knn_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+knn_final <- knn_wf %>%
+  finalize_workflow(select_best(knn_res, metric = "rmse"))
+knn_fit_resamples <- fit_resamples(knn_final, fb_folds)
+collect_metrics(knn_fit_resamples)[1,c(1,3,5)]
+```
+
+### Ridge Regression
+<br />
+The third model is Ridge Regression. Establish a workflow and tune the parameter `penalty` by -3 to -2 in 50 levels.  
+```{r}
+ridge_spec <- 
+  linear_reg(penalty = tune(), mixture = 0) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+ridge_wf <- workflow() %>% 
+  add_recipe(fb_recipe) %>% 
+  add_model(ridge_spec)
+
+penalty_grid <- grid_regular(penalty(range = c(-3, -2)), levels = 50)
+```
+<br />
+Tuning the Ridge Regression model. 
+```{r, warning=FALSE, eval=FALSE}
+ridge_res <- tune_grid(
+  ridge_wf,
+  resamples = fb_folds, 
+  grid = penalty_grid
+)
+```
+
+```{r}
+#save(ridge_res, file = 'tuned/ridge_res.rda')
+load(file = 'tuned/ridge_res.rda')
+```
+<br />
+Plot the performance of the model against the tuning parameter. The model's performance is better when penalty is small, and worsens dramatically after around `penalty` = 0.006.
+```{r}
+autoplot(ridge_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+ridge_final <- ridge_wf %>%
+  finalize_workflow(select_best(ridge_res, metric = "rmse"))
+ridge_fit_resamples <- fit_resamples(ridge_final, fb_folds)
+collect_metrics(ridge_fit_resamples)[1,c(1,3,5)]
+```
+### LASSO
+<br />
+The fourth model is LASSO. Establish a workflow and tune the parameters `penalty` by -3 to -1 and the `mixture` parameter by default in 10 levels each.  
+```{r}
+lasso_spec <- 
+  linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") 
+
+lasso_wf <- workflow() %>% 
+  add_recipe(fb_recipe) %>% 
+  add_model(lasso_spec)
+
+penalty_grid <- grid_regular(penalty(range = c(-3, -1)), mixture(), levels = 10)
+```
+<br />
+Tuning the LASSO model
+```{r, warning=FALSE,eval=FALSE, message=FALSE}
+lasso_res <- tune_grid(
+  lasso_wf,
+  resamples = fb_folds, 
+  grid = penalty_grid
+)
+```
+
+```{r, echo=FALSE}
+#save(lasso_res, file='tuned/lasso_res')
+load(file='tuned/lasso_res')
+```
+<br />
+Plot the performance of the model against the tuning parameter. Like the Ridge Regression model, it tends to perform better with smaller values of the tuning parameters.
+```{r}
+autoplot(lasso_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+lasso_final <- lasso_wf %>%
+  finalize_workflow(select_best(lasso_res, metric = "rmse"))
+lasso_fit_resamples <- fit_resamples(lasso_final, fb_folds)
+collect_metrics(lasso_fit_resamples)[1,c(1,3,5)]
+```
+### Single Decision Tree
+<br />
+The fifth model is Single Decision Tree. Establish a workflow and tune the parameters `cost_complexity` by -3 to -1 in 10 levels.  
+```{r}
+tree_spec <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+tree_wf <- workflow() %>%
+  add_model(tree_spec) %>%
+  add_recipe(fb_recipe)
+
+param_grid <- grid_regular(cost_complexity(range = c(-3,-1)), levels = 10)
+```
+<br />
+Tuning the decision tree model.
+```{r}
+tree_res <- tune_grid(
+  tree_wf, 
+  resamples = fb_folds, 
+  grid = param_grid, 
+  metrics = metric_set(rmse)
+)
+```
+
+```{r,echo=FALSE}
+#save(tree_res, file='tuned/tree_res.rda')
+load(file='tuned/tree_res.rda')
+```
+<br />
+Plot the performance of the model against the tuning parameter. The performance has two peaks around `cost_complexity` = 0.010. 
+```{r}
+autoplot(tree_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+tree_final <- tree_res %>%
+  select_best(metric = 'rmse') %>%
+  finalize_workflow(x = tree_wf) 
+
+tree_fit_resamples <- tree_final %>%
+  fit_resamples(resamples = fb_folds)
+
+collect_metrics(tree_fit_resamples, summarize = TRUE)[1,c(1,3,5)]
+```
+<br />
+We can visualize the best-performing pruned decision tree. Quite interestingly, this model did not consider most of the principal components. This implies that we've chosen too many principal components; on the other hands, this also suggests that the principal components we chose almost fully explained the variance in the original `fb` data set.
+```{r}
+tree_final %>%
+  fit(data = fb_train) %>%
+  extract_fit_engine() %>%
+  rpart.plot(roundint = FALSE)
+```
+
+### Random Forest
+<br />
+The sixth model is Random Forest. Establish a workflow and tune the parameters `mtry` by 1 to 11, `trees` by 1 to 61, and `min_n` by 7 to 25, in 7 levels each.  
+```{r}
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(fb_recipe)
+
+rf_grid <- grid_regular(mtry(range = c(1, 11)), trees(range = c(11, 101)), min_n(range = c(7,25)), levels = 7)
+
+```
+<br />
+Tuning the Random Forest.
+```{r, eval=FALSE}
+rf_res <- tune_grid(
+  rf_wf, 
+  resamples = fb_folds, 
+  grid = rf_grid, 
+  metrics = metric_set(rmse)
+)
+```
+
+```{r,echo=FALSE}
+#save(rf_res, file='tuned/rf_res.rda')
+load(file='tuned/rf_res.rda')
+```
+<br />
+Plot the performance of the model against the tuning parameters. 
+```{r}
+autoplot(rf_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+rf_final <- rf_res %>%
+  select_best(metric = 'rmse') %>%
+  finalize_workflow(x = rf_wf) 
+
+rf_fit_resamples <- rf_final %>%
+  fit_resamples(resamples = fb_folds)
+
+collect_metrics(rf_fit_resamples, summarize = TRUE)[1,c(1,3,5)]
+```
+<br />
+We make a variable importance plot here to assess the significance of each predictor. Unsurprisingly, the first two principle components are the most significant by a large margin, as this is hinted by the visualisation of the pruned decision tree.
+```{r}
+rf_fit <- rf_final %>%
+  fit(data = fb_train) 
+
+rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip()
+```
+
+### Boosted Tree
+<br />
+The seventh and last model is Boosted Trees. Establish a workflow and tune the parameters `mtry` by 1 to 11, `trees` by 10 to 40, in 11 levels each.   
+```{r}
+boost_spec <- boost_tree(trees = tune(), mtry = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+boost_grid <- grid_regular(trees(range = c(10,40)), mtry(range = c(1,11)), levels = 11)
+
+boost_wf <- workflow() %>%
+  add_model(boost_spec) %>%
+  add_recipe(fb_recipe)
+```
+
+```{r, eval=FALSE}
+boost_res <- tune_grid(
+  boost_wf,
+  resamples = fb_folds,
+  grid = boost_grid,
+  metrics = metric_set(rmse)
+)
+```
+
+```{r,echo=FALSE}
+#save(boost_res, file = 'tuned/boost_res.rda')
+load(file = 'tuned/boost_res.rda')
+```
+<br />
+Plot the performance of the model against the tuning parameter. The model performs the best when `trees` = 13 and `mtry` = 3.
+```{r}
+autoplot(boost_res)
+```
+<br />
+Select the best performing model based on RMSE and summarise its performance across the folds.
+```{r}
+boost_final <- boost_res %>%
+  select_best(metric = 'rmse') %>%
+  finalize_workflow(x = boost_wf) 
+
+boost_fit_resamples <- boost_final %>%
+  fit_resamples(resamples = fb_folds)
+
+collect_metrics(boost_fit_resamples, summarize = TRUE)[1,c(1,3,5)]
+```
+## Finalizing Model
+
+### Comparing Models
+<br />
+We create a table `comparison` to compare the performances of the seven models on the folds by the key performance metric---RMSE. 
+```{r}
+comparison<-rbind(
+  collect_metrics(lm_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(knn_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(ridge_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(lasso_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(tree_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(rf_fit_resamples)[1,c(1,3,5)],
+  collect_metrics(boost_fit_resamples)[1,c(1,3,5)]
+)
+
+comparison$model <- c("Linear Regression", "K Nearest Neighbours","Ridge Regression", "LASSO Regression", "Single Decision Tree", "Random Forest", "Boosted Tree")
+
+comparison
+```
+<br />
+This is a close race, but the **LASSO model** emerges as victor as it has the smallest mean RMSE and the smallest variance. Thus we select it as the model to fit the testing set. 
+
+### Selecting and Fitting the Best Model
+<br />
+Let's fit the winning model to the training set first. <br />
+There is actually one more trick we can pull off. Since `assists_per90` cannot be a negative, we can assign a prediction of 0 whenever our model predicts a negative value. Thus we can improve this model's accuracy. 
+
+```{r}
+lasso_fit_train <- fit (lasso_final, fb_train)
+metrics <- metric_set(rmse, rsq, mae)
+lasso_train_res <- predict(lasso_fit_train, new_data = fb_train %>% select(-assists_per90))%>% bind_cols(fb_train %>% select(assists_per90))
+
+#Pulling off the "trick"
+lasso_train_res$.pred <- 
+  ifelse(lasso_train_res$.pred<0, 0, lasso_train_res$.pred)
+
+head(lasso_train_res)
+```
+<br />
+Assess the overall performance of the model on the training set. 
+```{r}
+metrics(lasso_train_res, truth = assists_per90, estimate = .pred)
+```
+<br />
+In addition, we can make a scatter plot to show how much this model sucks on the training set.
+
+```{r}
+lasso_train_res %>%
+    ggplot(aes(x = .pred, y = assists_per90)) +
+    geom_point(alpha = 0.2) + geom_abline(color="blue") +
+    labs(x = "Awful Predictions", y = "Actual Values", title = "Whÿÿÿ")
+```
+<br />
+At last, we fit the model to the testing set and do the same trick.
+```{r}
+lasso_fit <- fit(lasso_final, fb_test)
+lasso_fit_res <- predict(lasso_fit, new_data = fb_test %>% select(-assists_per90))%>% bind_cols(fb_test %>% select(assists_per90)) %>% bind_cols(fb_test %>% select(PC01:position))
+
+#Pulling off the "trick"
+lasso_fit_res$.pred <- 
+  ifelse(lasso_fit_res$.pred<0, 0, lasso_fit_res$.pred)
+
+head(lasso_fit_res)
+```
+```{r,echo=FALSE,eval=FALSE}
+write.csv(lasso_fit_res, 'data/processed/lasso_fit_res.csv')
+```
+### Assessing Model Performance
+<br />
+Here we assess the overall performance of the model on the testing set, and compare it to the performance on the training set.
+```{r}
+compare_metrics <- rbind(
+  metrics(lasso_train_res, truth = assists_per90, estimate = .pred),
+  metrics(lasso_fit_res, truth = assists_per90, estimate = .pred)
+)
+
+compare_metrics$set <- c("Training", "Training", "Training", "Testing", "Testing", "Testing")
+
+compare_metrics
+```
+<br />
+The final performs slighly worse on the testing set with the RMSE and the MAE metrics, but it performs better with the root-squared metric. Therefore, it is pretty safe to assume that our model did not excessively overfit. 
+
+<br />
+We can make another scatter plot to show how much this model sucks on the testing set.
+
+```{r}
+lasso_fit_res %>%
+    ggplot(aes(x = .pred, y = assists_per90)) +
+    geom_point(alpha = 0.3, aes(color = position)) + geom_abline(color="blue") +
+    labs(x = "Awful Predictions", y = "Actual Values", title = "Truth by Prediction Scatter Plot")
+    #title = "Whÿÿÿÿÿ"
+```
+<br />
+Here we draw a residue plot for the predictions. 
+```{r}
+lasso_fit_res %>%
+    ggplot(aes(x = .pred, y = assists_per90-.pred)) +
+    geom_point(alpha = 0.3, aes(color = position)) +
+    geom_hline(color="purple", yintercept = 0) +
+    labs(x = "Awful Predictions", y = "Residues", title = "Residue Plot")
+    #title = "Whÿÿÿÿÿ"
+```
+<br />
+One problem becomes apparent in the residual plot: the residues tends to be larger where predictions (and actual *assists_per90*) are larger. This is most likely due to our "trick" to convert negative predictions into 0. In fact, our plot is decent in that most residuals are close to zero, as shown in the histogram below.
+
+```{r, warning=FALSE, message=FALSE}
+lasso_fit_res %>%
+    ggplot(aes(x = assists_per90-.pred)) +
+    geom_histogram(alpha = 0.3, aes(fill = position, color = position)) +
+    labs(x = "Actually Decent Residues", y = "Residual Count", title = "Histogram of Residues") 
+    #title = "Yeššššš"
+```
+<br />
+
+Lastly, let's pick a few observations and see how well our model is doing. Here is a list of the biggest over-performers according to the model.
+```{r}
+head(lasso_fit_res[order(lasso_fit_res$.pred - lasso_fit_res$assists_per90,decreasing = FALSE),][,c(1,2,13)])
+```
+<br />
+In reality, all of the player have seen their assisting frequencies decline this season. Although they are still over-performing, the difference between reality and prediction has decreased. Our model correctly recognized that they had been lucky. 
+<br />
+Here is a list of the biggest under-performers according to the model.
+```{r}
+head(lasso_fit_res[order(lasso_fit_res$.pred - lasso_fit_res$assists_per90,decreasing = TRUE),][,c(1,2,13)])
+```
+<br />
+Out of the five players who have remained in the big five leagues (excluding Nolito) , three have seen their assists number increase this season (López, Biraghi, and Williams). Our model correctly recognized that they had been unlucky. 
+
+Here is a list of five players that I actually recommendeded.
+```{r}
+lasso_fit_res[,c(1,2,13)] %>%
+  filter(player %in% c(
+    "Ludovic Ajorque",
+    "Jude Bellingham",
+    "Tomáš Souček",
+    "Nico Schlotterbeck",
+    "Leandro Trossard"
+  ))
+```
+<br /> It is not doing as well as I hoped, but I reckon it's better than nothing. 
+
+## Comments, Conclusions, and Chances for Improvement
+<br />
+In this project, I fitted models to predict football players' number of assists per game based on other football performance metrics. The high-level idea is to use metrics that has a higher occurrence (such as passes and shots) to predict a rarer and hence more volatile metric. The LASSO Regression model was the best out of all the models, although not by much; the linear regression model was a close second. This result demonstrates that a model's performance isn't inherently linked with its complexity. In this specific case, the more sophisticated tree-based models are actually beaten by the simplest model, linear regression. 
+
+The most likely explanation is this: football is not as complicated as it is random. If the actual correlation is simple, then fitting a complex model is both inaccurate and pointless. If anything, fitting complex models to simple correlation risks overfitting. We have to accept that, in football, there is an inherent randomness that we simply can't erase, and that randomness is perhaps higher than what's present in other data sets. After all, it is this random element that makes football fun, exciting, and intriguingly unpredictable. It is this very unpredictable nature that has led to so many fascinating football stories and legends.
+
+Unpredictable indeed, in a literal sense. Even our best model fails to capture the outcome variable, `assists_per90`, to a satisfying degree. The r-square of our model on the testing set is barely over 50%. Part of this ineffectiveness is due to randomness. In fact, some of the best models made by well-established names in the industry often fails to predict accurately, say, the result of a game. The other part is that this is not a very good model. Some of the variances in the data set are unaccounted for because there are factors not considered by the model. For instance, the model does not include a variable that identifies the league the player is in; the model does consider the tactics; the model does not consider the teammates' scoring abilities, etc.. And some of these are the type of data one usually has to pay for. Nonetheless, this project has certainly produced a model that is better than random guesses (what a compliment). And I'm okay with that. 
+
+Looking back, there are definitely things that I could've done better. One thing that would've improved my project is if I had used data from more than one season and combine them together. That way, there would be fewer players who never made an assist. Indeed, the fact that so many players never makes an assist in a season severely deteriorates the models' performance. However, as fbref.com actively updates the metrics they collect, blindly merging data sets over different seasons might lead to missing values. Another thing that could improve the project is if I used data from different sources. Unfortunately, this is complicated by the fact that different websites records data differently, and merging these data sets is currently out of my scope of capability. 
+
+A synonym of something out of my capability is something that I can learn. And I certainly hope I can learn more about data analytics in the future. 
