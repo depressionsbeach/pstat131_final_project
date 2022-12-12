@@ -1,0 +1,1 @@
+codebook.pdf is authored by Rafał Stępień. It actually contains descriptions for more variables than there actually are in my dataset.  You can safely desregard certain rows and the last four columns in his codebook. It is more than sufficient for the purpose of my project.
